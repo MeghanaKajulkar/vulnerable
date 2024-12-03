@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = 'meghana169/python_app'  // Docker registry for the image
+        DOCKER_CREDENTIALS = 'Docker_Hub_Access'  // Jenkins credentials ID for Docker Hub
+        GITHUB_CREDENTIALS = 'privet_repo_access'  // GitHub credentials for private repository
+    }
+
+    stages {
+        // SCM Checkout using credentials
+        stage('SCM Checkout') {
+            steps {
+                script {
+                    // Disable SSL verification for git (if necessary)
+                    bat 'git config --global http.sslVerify "false"'
+                    
+                    // Checkout code from GitHub using Jenkins credentials
+                    checkout([$class: 'GitSCM', 
+                              branches: [[name: '*/main']], 
+                              doGenerateSubmoduleConfigurations: false, 
+                              extensions: [], 
+                              submoduleCfg: [], 
+                              userRemoteConfigs: [
+                                  [credentialsId: "${GITHUB_CREDENTIALS}", url: 'https://github.com/MeghanaKajulkar/task_app_pipeline.git']
+                              ]
+                    ])
+                }
+            }
+        }
+
+        // Install Python Dependencies
+        stage('Install Dependencies') {
+            steps {
+                echo 'Installing Python dependencies...'
+                bat '''
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        // Run Unit Tests
+        stage('Run Unit Tests') {
+            steps {
+                echo 'Running unit tests...'
+                bat 'python -m unittest discover -s tests\\unit'
+            }
+        }
+ 
+        // Run Integration Tests
+        stage('Run Integration Tests') {
+            steps {
+                echo 'Running integration tests...'
+                bat 'python -m unittest discover -s tests\\integration'
+            }
+        }
+
+        // Build Docker Image
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image..."
+                bat "docker build --no-cache -t ${DOCKER_REGISTRY}:latest ."
+            }
+        }
+
+        // Push Docker Image to Docker Hub
+        stage('Push Docker Image') {
+            steps {
+                echo "Pushing Docker image to registry..."
+                bat "docker push ${DOCKER_REGISTRY}:latest"
+            }
+        }
+
+        // Stop and Restart Docker Container
+        stage('Docker Container') {
+            steps {
+                echo "Checking if container already exists..."
+
+                script {
+                    // Check if the container exists using docker ps
+                    def containerExists = bat(script: "docker ps -q -f name=task_app_container", returnStdout: true).trim()
+
+                    if (containerExists) {
+                        echo "Container exists. Checking the current image..."
+
+                        // Check the current image ID of the container, but avoid failure if it doesn't exist
+                        def currentImageId = ''
+                        try {
+                            currentImageId = bat(script: "docker inspect --format '{{.Image}}' task_app_container", returnStdout: true).trim()
+                        } catch (Exception e) {
+                            echo "Error inspecting container: ${e.getMessage()}"
+                        }
+
+                        // Get the latest image ID
+                        def latestImageId = bat(script: "docker images -q ${DOCKER_REGISTRY}:latest", returnStdout: true).trim()
+
+                        // Compare the current image with the latest image and handle accordingly
+                        if (currentImageId == latestImageId) {
+                            echo "Container is up-to-date. Restarting container..."
+                            bat "docker restart task_app_container"  // Restart container if the image is the same
+                        } else {
+                            echo "Image has changed. Stopping and removing the container..."
+                            try {
+                                bat "docker stop task_app_container"  // Stop the existing container
+                                bat "docker rm task_app_container"    // Remove the existing container
+                            } catch (Exception e) {
+                                echo "Error stopping/removing container: ${e.getMessage()}"
+                            }
+
+                            echo "Creating a new container with the latest image..."
+                            bat "docker run -d -p 8081:5000 --name task_app_container ${DOCKER_REGISTRY}:latest"  // Create new container with latest image
+                        }
+                    } else {
+                        echo "Container does not exist. Creating a new container..."
+                        bat "docker run -d -p 8081:5000 --name task_app_container ${DOCKER_REGISTRY}:latest"  // Create new container if not exists
+                    }
+                }
+            }
+        }
+    }
+}
