@@ -1,0 +1,118 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = 'meghanamk24/task_app' // Docker registry for the image (ensure lowercase)
+        DOCKER_CREDENTIALS = 'finaldockeraccess' // Jenkins credentials ID for Docker Hub
+        GITHUB_CREDENTIALS = 'gitub_personal_access' // Jenkins credentials ID for GitHub repository
+    }
+
+    stages {
+        // SCM Checkout using credentials
+        stage('SCM Checkout') {
+            steps {
+                script {
+                    // Disable SSL verification for git (if necessary)
+                    bat 'git config --global http.sslVerify "false"'
+
+                    // Checkout code from GitHub using Jenkins credentials
+                    checkout([$class: 'GitSCM', 
+                              branches: [[name: '*/main']], 
+                              doGenerateSubmoduleConfigurations: false, 
+                              extensions: [], 
+                              submoduleCfg: [], 
+                              userRemoteConfigs: [
+                                  [credentialsId: "${GITHUB_CREDENTIALS}", url: 'https://github.com/MeghanaKajulkar/task_management_dashboard.git']
+                              ]
+                    ])
+                }
+            }
+        }
+
+        // Install Python Dependencies
+        stage('Install Dependencies') {
+            steps {
+                echo 'Installing Python dependencies...'
+                bat '''
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        // Run Unit Tests
+        stage('Run Unit Tests') {
+            steps {
+                echo 'Running unit tests...'
+                bat 'python -m unittest tests.test_unit'
+            }
+        }
+
+        // Run Integration Tests
+        stage('Run Integration Tests') {
+            steps {
+                echo 'Running integration tests...'
+                bat 'python -m unittest tests.test_integration'
+            }
+        }
+
+        // Build Docker Image
+        stage('Build Docker Image') {
+            steps {
+                echo "Building Docker image..."
+                bat "docker build --no-cache -t ${DOCKER_REGISTRY}:latest ."
+            }
+        }
+
+        // Login to Docker Hub
+        stage('Login to Docker Hub') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDENTIALS}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        bat '''
+                            echo %DOCKER_PASS% | docker login -u %DOCKER_USER% --password-stdin
+                        '''
+                    }
+                }
+            }
+        }
+
+        // Push Docker Image to Docker Hub
+        stage('Push Docker Image') {
+            steps {
+                echo "Pushing Docker image to registry..."
+                bat "docker push ${DOCKER_REGISTRY}:latest"
+            }
+        }
+
+        // Stop and Restart Docker Container
+        stage('Docker Container Management') {
+            steps {
+                echo "Managing Docker container..."
+
+                script {
+                    // Check if the container exists
+                    def containerExists = bat(script: "docker ps -q -f name=task_dashboard_container", returnStdout: true).trim()
+
+                    if (containerExists) {
+                        echo "Container exists. Checking the current image..."
+                        def currentImageId = bat(script: "docker inspect --format '{{.Image}}' task_dashboard_container", returnStdout: true).trim()
+                        def latestImageId = bat(script: "docker images -q ${DOCKER_REGISTRY}:latest", returnStdout: true).trim()
+
+                        if (currentImageId == latestImageId) {
+                            echo "Container is up-to-date. Restarting container..."
+                            bat "docker restart task_dashboard_container"
+                        } else {
+                            echo "Image has changed. Stopping and removing the container..."
+                            bat "docker stop task_dashboard_container || true"
+                            bat "docker rm task_dashboard_container || true"
+                            bat "docker run -d -p 8501:8501 --name task_dashboard_container ${DOCKER_REGISTRY}:latest"
+                        }
+                    } else {
+                        echo "Container does not exist. Creating a new container..."
+                        bat "docker run -d -p 8501:8501 --name task_dashboard_container ${DOCKER_REGISTRY}:latest"
+                    }
+                }
+            }
+        }
+    }
+}
